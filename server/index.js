@@ -52,12 +52,34 @@ wss.on('connection', (ws) => {
         if (isBinary) {
             for (const [roomName, room] of rooms.entries()) {
                 if (room.activeUsers.has(ws)) {
+                    // 1. Gelen harfi hafızadaki Yjs belgesine işle
                     Y.applyUpdate(room.ydoc, new Uint8Array(message));
+
+                    // 2. HİÇ BEKLEMEDEN anında diğer kullanıcılara fırlat! (Senkronizasyonun kalbi)
                     room.activeUsers.forEach((uname, client) => {
-                        if (client !== ws && client.readyState === WebSocket.OPEN) client.send(message);
+                        if (client !== ws && client.readyState === WebSocket.OPEN) {
+                            client.send(message);
+                        }
                     });
-                    const stateBuffer = Buffer.from(Y.encodeStateAsUpdate(room.ydoc));
-                    await RoomState.findOneAndUpdate({ roomId: roomName }, { $set: { codeState: stateBuffer } }, { upsert: true });
+
+                    // 3. Veritabanını her harfte boğmamak için "Debounce" yapıyoruz
+                    // Eğer önceden ayarlanmış bir kayıt sayacı varsa onu iptal et
+                    if (room.saveTimeout) clearTimeout(room.saveTimeout);
+
+                    // Yazma işlemi bittikten 2 saniye sonra veritabanına tek seferde kaydet
+                    room.saveTimeout = setTimeout(async () => {
+                        try {
+                            const stateBuffer = Buffer.from(Y.encodeStateAsUpdate(room.ydoc));
+                            await RoomState.findOneAndUpdate(
+                                { roomId: roomName },
+                                { $set: { codeState: stateBuffer } },
+                                { upsert: true }
+                            );
+                        } catch (err) {
+                            console.log("DB Kayıt hatası:", err);
+                        }
+                    }, 2000);
+
                     break;
                 }
             }
