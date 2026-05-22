@@ -34,10 +34,12 @@ mongoose.connect(MONGO_URI)
 const rooms = new Map();
 
 function broadcastUserList(room) {
-    const userList = Array.from(room.activeUsers.values());
+    // 🔴 YENİ: Set kullanarak aynı isimleri teke düşürüyoruz!
+    const uniqueUsers = [...new Set(room.activeUsers.values())];
+
     for (const client of room.activeUsers.keys()) {
         if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({ type: 'users', data: userList }));
+            client.send(JSON.stringify({ type: 'users', data: uniqueUsers }));
         }
     }
 }
