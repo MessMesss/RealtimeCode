@@ -35,7 +35,7 @@ export default function AuthScreen({ onLogin }) {
         }
 
         setStatusMsg({ text: 'İşlem yapılıyor...', type: 'info' });
-        const url = isLogin ? 'http://localhost:5000/api/login' : 'http://localhost:5000/api/register';
+        const url = isLogin ? 'https://realtimecode-mr24.onrender.com/api/login' : 'https://realtimecode-mr24.onrender.com/api/register';
         const payload = isLogin ? { identifier, password } : { username, email, password };
 
         try {

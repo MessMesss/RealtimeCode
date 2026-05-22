@@ -7,7 +7,7 @@ export default function GlobalListener({ user }) {
 
     useEffect(() => {
         if (!user) return;
-        const globalWs = new WebSocket('ws://localhost:5000');
+        const globalWs = new WebSocket('wss://realtimecode-mr24.onrender.com');
         globalWs.onopen = () => globalWs.send(JSON.stringify({ type: 'init', username: user }));
 
         globalWs.onmessage = (e) => {

@@ -24,20 +24,20 @@ export default function EditorRoom({ username }) {
 
     const fetchOnlineFriends = async () => {
         try {
-            const res = await fetch(`http://localhost:5000/api/friends/${username}`);
+            const res = await fetch(`https://realtimecode-mr24.onrender.com/api/friends/${username}`);
             const data = await res.json();
             setOnlineFriends(data.filter(f => f.isOnline));
         } catch (err) { }
     };
 
     useEffect(() => {
-        fetch('http://localhost:5000/api/join-room', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, roomId }) });
-        fetch(`http://localhost:5000/api/room/${roomId}`).then(res => res.json()).then(data => { if (data.roomName) setRoomName(data.roomName); });
+        fetch('https://realtimecode-mr24.onrender.com/api/join-room', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, roomId }) });
+        fetch(`https://realtimecode-mr24.onrender.com/api/room/${roomId}`).then(res => res.json()).then(data => { if (data.roomName) setRoomName(data.roomName); });
 
         fetchOnlineFriends();
         const interval = setInterval(fetchOnlineFriends, 5000);
 
-        const ws = new WebSocket('ws://localhost:5000');
+        const ws = new WebSocket('wss://realtimecode-mr24.onrender.com');
         wsRef.current = ws;
         ws.onopen = () => ws.send(JSON.stringify({ type: 'join', room: roomId, username: username }));
 
@@ -93,7 +93,7 @@ export default function EditorRoom({ username }) {
 
     const inviteFriend = async (targetUsername) => {
         try {
-            const res = await fetch('http://localhost:5000/api/send-invite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sender: username, targetUsername, roomId, roomName }) });
+            const res = await fetch('https://realtimecode-mr24.onrender.com/api/send-invite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sender: username, targetUsername, roomId, roomName }) });
             if (res.ok) setInviteMsg(`✅ ${targetUsername} davet edildi!`);
             else setInviteMsg(`❌ ${targetUsername} ulaşılamıyor.`);
             setTimeout(() => setInviteMsg(''), 3000);
