@@ -14,11 +14,13 @@ export default function EditorRoom({ username }) {
     const [onlineFriends, setOnlineFriends] = useState([]);
     const [inviteMsg, setInviteMsg] = useState('');
 
-    // 🔴 YENİ: Sesli Sohbet State ve Ref Yapıları
+    // 🔴 YENİ: Sesli Sohbet ve Mikrofon Durumları
     const [isAudioOn, setIsAudioOn] = useState(false);
-    const localStreamRef = useRef(null);
-    const peerConnections = useRef({}); // peerUsername -> RTCPeerConnection
+    const [isMuted, setIsMuted] = useState(false);
+    const [audioStatus, setAudioStatus] = useState({}); // Odadakilerin ses durumu { "Ahmet": "unmute", "Mehmet": "mute" }
 
+    const localStreamRef = useRef(null);
+    const peerConnections = useRef({});
     const wsRef = useRef(null);
     const ydocRef = useRef(new Y.Doc());
 
@@ -52,17 +54,21 @@ export default function EditorRoom({ username }) {
                 if (received.type === 'users') setActiveUsers(received.data);
                 if (received.type === 'chat') setMessages((prev) => [...prev, received.data]);
 
-                // 🔴 YENİ: WebRTC Sinyal Yakalayıcı (Gelen teklif/cevapları işler)
                 if (received.type === 'signal') {
                     handleSignalingMessage(received.sender, received.data);
                 }
 
-                // 🔴 YENİ: Odadaki bir arkadaşın ses kanalına girdiğini veya çıktığını algılama
+                // 🔴 YENİ: Ses kanalındaki mikrofon hareketlerini (Aç/Kapat/Ayrıl) algılama
                 if (received.type === 'audio_action') {
                     const { sender, action } = received;
+
+                    // Arayüzdeki mikrofon ikonunu güncelle
+                    setAudioStatus(prev => ({ ...prev, [sender]: action }));
+
                     if (action === 'join' && isAudioOn) {
-                        // Biz zaten sesteysek, kanala yeni giren kişiye el sıkışma (Offer) başlatıyoruz
                         createPeerConnection(sender, true);
+                        // Odaya yeni biri girdiğinde ona kendi mikrofon durumumuzu da yollayalım ki ikonu doğru görsün
+                        ws.send(JSON.stringify({ type: 'audio_action', sender: username, action: isMuted ? 'mute' : 'unmute' }));
                     } else if (action === 'leave') {
                         closePeerConnection(sender);
                     }
@@ -74,9 +80,9 @@ export default function EditorRoom({ username }) {
         return () => {
             ws.close();
             clearInterval(interval);
-            stopAudio(); // Odadan çıkarsa mikrofonu zorla kapat
+            stopAudio();
         }
-    }, [roomId, username, isAudioOn]); // isAudioOn bağımlılığı el sıkışma tetiklemesi için şart
+    }, [roomId, username, isAudioOn, isMuted]);
 
     function handleEditorDidMount(editor, monaco) {
         const ytext = ydocRef.current.getText('monaco');
@@ -113,19 +119,43 @@ export default function EditorRoom({ username }) {
         a.href = url; a.download = 'main.cs'; a.click(); URL.revokeObjectURL(url);
     };
 
-    // 🔴 YENİ: SESLİ SOHBET CANLI MOTORU (WebRTC Mesh Mimarisi)
+    // 🔴 YENİ: Ses Bağlantısını Başlatma
     const startAudio = async () => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             localStreamRef.current = stream;
             setIsAudioOn(true);
-            // Diğer üyelere sese girdiğimizi haykıralım
+            setIsMuted(false);
+            setAudioStatus(prev => ({ ...prev, [username]: 'unmute' }));
             wsRef.current.send(JSON.stringify({ type: 'audio_action', sender: username, action: 'join' }));
+
+            // Girdikten yarım saniye sonra mikrofonun açık olduğunu da teyit et
+            setTimeout(() => {
+                wsRef.current.send(JSON.stringify({ type: 'audio_action', sender: username, action: 'unmute' }));
+            }, 500);
         } catch (err) {
-            alert("Mikrofon izni verilmedi abi! Ayarlardan ses iznini açman lazım.");
+            alert("Mikrofon izni verilmedi! Ayarlardan tarayıcı mikrofon iznini açman lazım.");
         }
     };
 
+    // 🔴 YENİ: Mikrofonu Kapat/Aç (Sesten çıkmadan)
+    const toggleMute = () => {
+        if (localStreamRef.current) {
+            const audioTrack = localStreamRef.current.getAudioTracks()[0];
+            audioTrack.enabled = !audioTrack.enabled;
+            const newMutedState = !audioTrack.enabled;
+
+            setIsMuted(newMutedState);
+            const actionType = newMutedState ? 'mute' : 'unmute';
+            setAudioStatus(prev => ({ ...prev, [username]: actionType }));
+
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: 'audio_action', sender: username, action: actionType }));
+            }
+        }
+    };
+
+    // 🔴 YENİ: Ses Bağlantısını Komple Kapatma
     const stopAudio = () => {
         if (localStreamRef.current) {
             localStreamRef.current.getTracks().forEach(track => track.stop());
@@ -133,6 +163,8 @@ export default function EditorRoom({ username }) {
         }
         Object.keys(peerConnections.current).forEach(peerName => closePeerConnection(peerName));
         setIsAudioOn(false);
+        setIsMuted(false);
+        setAudioStatus(prev => ({ ...prev, [username]: 'leave' }));
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: 'audio_action', sender: username, action: 'leave' }));
         }
@@ -141,28 +173,29 @@ export default function EditorRoom({ username }) {
     const createPeerConnection = (peerUsername, isInitiator) => {
         if (peerConnections.current[peerUsername]) return;
 
-        // Google'ın herkese açık bedava kararlı STUN sunucusunu köprü olarak kullanıyoruz
+        // 🔴 YENİ: Güçlendirilmiş STUN Sunucuları (Google + Twilio)
         const pc = new RTCPeerConnection({
-            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:global.stun.twilio.com:3478' }
+            ]
         });
 
         peerConnections.current[peerUsername] = pc;
 
-        // Kendi sesimizi bu tünele enjekte ediyoruz
         if (localStreamRef.current) {
             localStreamRef.current.getTracks().forEach(track => {
                 pc.addTrack(track, localStreamRef.current);
             });
         }
 
-        // Doğal internet hattı (ICE) yollarını karşı tarafa sinyal olarak yolluyoruz
         pc.onicecandidate = (event) => {
             if (event.candidate && wsRef.current) {
                 wsRef.current.send(JSON.stringify({ type: 'signal', sender: username, target: peerUsername, data: { candidate: event.candidate } }));
             }
         };
 
-        // Karşı tarafın sesi geldiği an tarayıcıda dinamik gizli bir <audio> objesi oluşturup çalıyoruz
         pc.ontrack = (event) => {
             let audioEl = document.getElementById(`audio-${peerUsername}`);
             if (!audioEl) {
@@ -174,7 +207,6 @@ export default function EditorRoom({ username }) {
             audioEl.srcObject = event.streams[0];
         };
 
-        // Eğer el sıkışmayı başlatan bizsek, ses teklifini (Offer) oluşturup WebSocket ile fırlatıyoruz
         if (isInitiator) {
             pc.onnegotiationneeded = async () => {
                 try {
@@ -188,7 +220,6 @@ export default function EditorRoom({ username }) {
 
     const handleSignalingMessage = async (sender, data) => {
         if (!peerConnections.current[sender]) {
-            // Eğer bağlantı yoksa karşıdan teklif gelmiş demektir, hemen tüneli aç
             createPeerConnection(sender, false);
         }
         const pc = peerConnections.current[sender];
@@ -216,6 +247,14 @@ export default function EditorRoom({ username }) {
 
     const invitableFriends = onlineFriends.filter(f => !activeUsers.includes(f.username));
 
+    // 🔴 YENİ: İkon Belirleme Fonksiyonu
+    const getAudioIcon = (uname) => {
+        const status = audioStatus[uname];
+        if (status === 'join' || status === 'unmute') return '🎤';
+        if (status === 'mute') return '🔇';
+        return ''; // Seste değilse boş döner
+    };
+
     return (
         <div style={{ display: 'flex', height: '100vh', width: '100vw', backgroundColor: '#121212', color: '#fff', fontFamily: 'sans-serif', margin: 0, padding: '20px', boxSizing: 'border-box', gap: '20px', overflow: 'hidden' }}>
 
@@ -228,19 +267,31 @@ export default function EditorRoom({ username }) {
                     <p style={{ fontSize: '12px', color: '#888', margin: 0 }}>Oda ID: <span style={{ color: '#85c46c', fontWeight: 'bold' }}>{roomId}</span></p>
                 </div>
 
-                {/* 🔴 YENİ: DISCORD TARZI SESLİ KANAL PANELİ */}
+                {/* 🔴 YENİ: Gelişmiş Sesli Kanal Paneli */}
                 <div style={{ backgroundColor: isAudioOn ? '#1c3a1e' : '#252526', padding: '15px', borderRadius: '10px', marginBottom: '20px', border: isAudioOn ? '1px solid #4caf50' : '1px solid #333', transition: '0.3s' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isAudioOn ? '10px' : '0' }}>
                         <span style={{ fontSize: '13px', fontWeight: 'bold', color: isAudioOn ? '#85c46c' : '#aaa' }}>
                             {isAudioOn ? '📡 Ses Bağlantısı Aktif' : '🔇 Ses Kanalı Kapalı'}
                         </span>
-                        <button
-                            onClick={isAudioOn ? stopAudio : startAudio}
-                            style={{ padding: '6px 12px', backgroundColor: isAudioOn ? '#d32f2f' : '#4caf50', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px' }}
-                        >
-                            {isAudioOn ? 'Ayrıl' : 'Sese Bağlan'}
-                        </button>
+
+                        {!isAudioOn && (
+                            <button onClick={startAudio} style={{ padding: '6px 12px', backgroundColor: '#4caf50', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px' }}>
+                                Bağlan
+                            </button>
+                        )}
                     </div>
+
+                    {/* Sese girildiyse Mikrofon ve Ayrıl butonları çıkar */}
+                    {isAudioOn && (
+                        <div style={{ display: 'flex', gap: '10px' }}>
+                            <button onClick={toggleMute} style={{ flex: 1, padding: '8px', backgroundColor: isMuted ? '#d4d4d4' : '#4ea8de', color: '#121212', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px' }}>
+                                {isMuted ? '🎤 Sesi Aç' : '🔇 Sustur'}
+                            </button>
+                            <button onClick={stopAudio} style={{ padding: '8px 12px', backgroundColor: '#d32f2f', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px' }}>
+                                ❌ Ayrıl
+                            </button>
+                        </div>
+                    )}
                 </div>
 
                 {/* Odadakiler */}
@@ -248,8 +299,12 @@ export default function EditorRoom({ username }) {
                     <h4 style={{ color: '#85c46c', marginTop: 0, marginBottom: '12px', fontSize: '14px', textTransform: 'uppercase', letterSpacing: '1px' }}>👥 Odadakİler</h4>
                     <ul style={{ listStyleType: 'none', padding: 0, margin: 0, maxHeight: '100px', overflowY: 'auto' }}>
                         {activeUsers.map((user, idx) => (
-                            <li key={idx} style={{ padding: '6px 0', color: user === username ? '#4caf50' : '#4ea8de', fontWeight: 'bold', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <span style={{ fontSize: '10px' }}>🟢</span> {user} {user === username ? <span style={{ fontSize: '11px', color: '#888' }}>(Sen)</span> : ''}
+                            <li key={idx} style={{ padding: '6px 0', color: user === username ? '#4caf50' : '#4ea8de', fontWeight: 'bold', fontSize: '14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <span style={{ fontSize: '10px' }}>🟢</span> {user} {user === username ? <span style={{ fontSize: '11px', color: '#888' }}>(Sen)</span> : ''}
+                                </div>
+                                {/* 🔴 YENİ: İkonu Gösterme Alanı */}
+                                <span style={{ fontSize: '16px' }}>{getAudioIcon(user)}</span>
                             </li>
                         ))}
                     </ul>
@@ -290,7 +345,7 @@ export default function EditorRoom({ username }) {
                 </div>
             </div>
 
-            {/* SAĞ PANEL (Sadece Editör - Temiz ve Odaklanmış) */}
+            {/* SAĞ PANEL */}
             <div style={{ flex: 1, height: '100%', display: 'flex', flexDirection: 'column', backgroundColor: '#1a1a1a', borderRadius: '16px', overflow: 'hidden', boxSizing: 'border-box', boxShadow: '0 4px 12px rgba(0,0,0,0.3)' }}>
                 <div style={{ padding: '15px 25px', backgroundColor: '#1a1a1a', borderBottom: '1px solid #333', display: 'flex', justifyContent: 'space-between', alignItems: 'center', height: '60px', boxSizing: 'border-box' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
