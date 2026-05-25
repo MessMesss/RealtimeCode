@@ -14,13 +14,11 @@ export default function EditorRoom({ username }) {
     const [onlineFriends, setOnlineFriends] = useState([]);
     const [inviteMsg, setInviteMsg] = useState('');
 
-    // 🔴 GELİŞMİŞ SES DURUMLARI (Zoom / Discord Mantığı)
     const [isAudioOn, setIsAudioOn] = useState(false);
     const [isMicOn, setIsMicOn] = useState(true);
     const [isSpeakerOn, setIsSpeakerOn] = useState(true);
-    const [audioStatus, setAudioStatus] = useState({}); // { "Mustafa": "unmute", "Ali": "mute" }
+    const [audioStatus, setAudioStatus] = useState({});
 
-    // React'ın bağlantıyı koparmaması için Ref kopyaları
     const isAudioOnRef = useRef(false);
     const isMicOnRef = useRef(true);
     const isSpeakerOnRef = useRef(true);
@@ -46,13 +44,14 @@ export default function EditorRoom({ username }) {
         const interval = setInterval(fetchOnlineFriends, 5000);
 
         const ws = new WebSocket('wss://realtimecode-mr24.onrender.com');
+        ws.binaryType = 'arraybuffer';
         wsRef.current = ws;
+
         ws.onopen = () => ws.send(JSON.stringify({ type: 'join', room: roomId, username: username }));
 
         ws.onmessage = async (event) => {
-            if (event.data instanceof Blob) {
-                const arrayBuffer = await event.data.arrayBuffer();
-                Y.applyUpdate(ydocRef.current, new Uint8Array(arrayBuffer));
+            if (event.data instanceof ArrayBuffer) {
+                Y.applyUpdate(ydocRef.current, new Uint8Array(event.data));
                 return;
             }
             try {
@@ -66,8 +65,6 @@ export default function EditorRoom({ username }) {
 
                 if (received.type === 'audio_action') {
                     const { sender, action } = received;
-
-                    // Arayüzdeki mikrofon ikonlarını güncelle (Susturuldu mu, açıldı mı, sesten çıktı mı?)
                     setAudioStatus(prev => {
                         const newStatus = { ...prev };
                         if (action === 'leave') delete newStatus[sender];
@@ -77,7 +74,6 @@ export default function EditorRoom({ username }) {
 
                     if (action === 'join' && isAudioOnRef.current) {
                         createPeerConnection(sender, true);
-                        // Odaya biri girdiğinde kendi mikrofon durumumu ona gönderiyorum ki beni doğru görsün
                         ws.send(JSON.stringify({ type: 'audio_action', sender: username, action: isMicOnRef.current ? 'unmute' : 'mute' }));
                     } else if (action === 'leave') {
                         closePeerConnection(sender);
@@ -94,52 +90,20 @@ export default function EditorRoom({ username }) {
     }, [roomId, username]);
 
     function handleEditorDidMount(editor, monaco) {
+        editor.getModel().setEOL(monaco.editor.EndOfLineSequence.LF);
         const ytext = ydocRef.current.getText('monaco');
         ydocRef.current.on('update', (update) => { if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) wsRef.current.send(update); });
         new MonacoBinding(ytext, editor.getModel(), new Set([editor]), null);
     }
 
-    function executeSendMessage() {
-        if (inputMessage.trim() !== '' && wsRef.current) {
-            wsRef.current.send(JSON.stringify({ type: 'chat', data: { sender: username, text: inputMessage.trim() } }));
-            setInputMessage('');
-        }
-    }
-
-    const inviteFriend = async (targetUsername) => {
-        try {
-            const res = await fetch('https://realtimecode-mr24.onrender.com/api/send-invite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sender: username, targetUsername, roomId, roomName }) });
-            if (res.ok) setInviteMsg(`✅ ${targetUsername} davet edildi!`);
-            else setInviteMsg(`❌ ${targetUsername} ulaşılamıyor.`);
-            setTimeout(() => setInviteMsg(''), 3000);
-        } catch (err) { setInviteMsg('❌ Sunucu hatası!'); setTimeout(() => setInviteMsg(''), 3000); }
-    };
-
-    function copyRoomLink() {
-        navigator.clipboard.writeText(window.location.href);
-        alert("Oda linki kopyalandı! Arkadaşına atabilirsin.");
-    }
-
-    const downloadCode = () => {
-        const code = ydocRef.current.getText('monaco').toString();
-        const blob = new Blob([code], { type: 'text/plain;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = 'main.cs'; a.click(); URL.revokeObjectURL(url);
-    };
-
-    // Sese Katılma
     const startAudio = async () => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
                 audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
             });
             localStreamRef.current = stream;
-
             setIsAudioOn(true);
             isAudioOnRef.current = true;
-
-            // Sese girerken ikonlar default açık başlar
             setIsMicOn(true);
             isMicOnRef.current = true;
             setIsSpeakerOn(true);
@@ -149,43 +113,33 @@ export default function EditorRoom({ username }) {
             wsRef.current.send(JSON.stringify({ type: 'audio_action', sender: username, action: 'join' }));
             setTimeout(() => wsRef.current.send(JSON.stringify({ type: 'audio_action', sender: username, action: 'unmute' })), 500);
         } catch (err) {
-            alert("Mikrofon izni verilmedi abi! Ayarlardan tarayıcı mikrofon iznini açman lazım.");
+            alert("Mikrofon izni verilmedi abi!");
         }
     };
 
-    // 🔴 YENİ: Kendi Mikrofonumuzu Aç / Kapat
     const toggleMic = () => {
         if (localStreamRef.current) {
             const audioTrack = localStreamRef.current.getAudioTracks()[0];
             const newState = !audioTrack.enabled;
             audioTrack.enabled = newState;
-
             setIsMicOn(newState);
             isMicOnRef.current = newState;
-
             const action = newState ? 'unmute' : 'mute';
             setAudioStatus(prev => ({ ...prev, [username]: action }));
-
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({ type: 'audio_action', sender: username, action }));
-            }
+            wsRef.current.send(JSON.stringify({ type: 'audio_action', sender: username, action }));
         }
     };
 
-    // 🔴 YENİ: Başkalarının Sesini Aç / Kapat (Hoparlör Sağırlaştırma)
     const toggleSpeaker = () => {
         const newState = !isSpeakerOn;
         setIsSpeakerOn(newState);
         isSpeakerOnRef.current = newState;
-
-        // Odadaki herkesin ses elementini (audio tag) bul ve sesini kıs/aç
         Object.keys(peerConnections.current).forEach(peerName => {
             const audioEl = document.getElementById(`audio-${peerName}`);
             if (audioEl) audioEl.muted = !newState;
         });
     };
 
-    // Sesten Komple Ayrılma
     const stopAudio = () => {
         try {
             if (localStreamRef.current) {
@@ -196,9 +150,6 @@ export default function EditorRoom({ username }) {
         } catch (e) { } finally {
             setIsAudioOn(false);
             isAudioOnRef.current = false;
-
-            setAudioStatus(prev => { const n = { ...prev }; delete n[username]; return n; });
-
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({ type: 'audio_action', sender: username, action: 'leave' }));
             }
@@ -207,48 +158,31 @@ export default function EditorRoom({ username }) {
 
     const createPeerConnection = (peerUsername, isInitiator) => {
         if (peerConnections.current[peerUsername]) return;
-
         const pc = new RTCPeerConnection({
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
                 { urls: 'turn:openrelay.metered.ca:80', username: "openrelayproject", credential: "openrelayproject" }
             ]
         });
-
         peerConnections.current[peerUsername] = pc;
-
-        if (localStreamRef.current) {
-            localStreamRef.current.getTracks().forEach(track => pc.addTrack(track, localStreamRef.current));
-        }
-
-        pc.onicecandidate = (event) => {
-            if (event.candidate && wsRef.current) {
-                wsRef.current.send(JSON.stringify({ type: 'signal', sender: username, target: peerUsername, data: { candidate: event.candidate } }));
-            }
-        };
-
+        if (localStreamRef.current) localStreamRef.current.getTracks().forEach(track => pc.addTrack(track, localStreamRef.current));
+        pc.onicecandidate = (event) => { if (event.candidate && wsRef.current) wsRef.current.send(JSON.stringify({ type: 'signal', sender: username, target: peerUsername, data: { candidate: event.candidate } })); };
         pc.ontrack = (event) => {
             let audioEl = document.getElementById(`audio-${peerUsername}`);
             if (!audioEl) {
                 audioEl = document.createElement('audio');
                 audioEl.id = `audio-${peerUsername}`;
                 audioEl.autoplay = true;
-                // Eğer biz hoparlörü tamamen kapatmışsak, yeni giren kişiyi de sessize alıyoruz!
                 audioEl.muted = !isSpeakerOnRef.current;
                 document.body.appendChild(audioEl);
             }
             audioEl.srcObject = event.streams[0];
-
-            audioEl.onloadedmetadata = () => audioEl.play().catch(() => { });
         };
-
         if (isInitiator) {
             pc.onnegotiationneeded = async () => {
-                try {
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-                    wsRef.current.send(JSON.stringify({ type: 'signal', sender: username, target: peerUsername, data: { sdp: pc.localDescription } }));
-                } catch (err) { }
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                wsRef.current.send(JSON.stringify({ type: 'signal', sender: username, target: peerUsername, data: { sdp: pc.localDescription } }));
             };
         }
     };
@@ -256,29 +190,36 @@ export default function EditorRoom({ username }) {
     const handleSignalingMessage = async (sender, data) => {
         if (!peerConnections.current[sender]) createPeerConnection(sender, false);
         const pc = peerConnections.current[sender];
-        try {
-            if (data.sdp) {
-                await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-                if (data.sdp.type === 'offer') {
-                    const answer = await pc.createAnswer();
-                    await pc.setLocalDescription(answer);
-                    wsRef.current.send(JSON.stringify({ type: 'signal', sender: username, target: sender, data: { sdp: pc.localDescription } }));
-                }
-            } else if (data.candidate) {
-                if (pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-                else setTimeout(async () => { try { if (pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(data.candidate)); } catch (e) { } }, 1500);
+        if (data.sdp) {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+            if (data.sdp.type === 'offer') {
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                wsRef.current.send(JSON.stringify({ type: 'signal', sender: username, target: sender, data: { sdp: pc.localDescription } }));
             }
-        } catch (err) { }
+        } else if (data.candidate) {
+            if (pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        }
     };
 
     const closePeerConnection = (peerUsername) => {
-        if (peerConnections.current[peerUsername]) {
-            peerConnections.current[peerUsername].close();
-            delete peerConnections.current[peerUsername];
-        }
+        if (peerConnections.current[peerUsername]) { peerConnections.current[peerUsername].close(); delete peerConnections.current[peerUsername]; }
         const audioEl = document.getElementById(`audio-${peerUsername}`);
         if (audioEl) audioEl.remove();
     };
+
+    const inviteFriend = async (targetUsername) => {
+        try {
+            const res = await fetch('https://realtimecode-mr24.onrender.com/api/send-invite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sender: username, targetUsername, roomId, roomName }) });
+            if (res.ok) setInviteMsg(`✅ ${targetUsername} davet edildi!`);
+            else setInviteMsg(`❌ ${targetUsername} ulaşılamıyor.`);
+            setTimeout(() => setInviteMsg(''), 3000);
+        } catch (err) { setInviteMsg('❌ Sunucu hatası!'); setTimeout(() => setInviteMsg(''), 3000); }
+    };
+
+    const copyRoomLink = () => { navigator.clipboard.writeText(window.location.href); alert("Oda linki kopyalandı! Arkadaşına atabilirsin."); };
+    const downloadCode = () => { const code = ydocRef.current.getText('monaco').toString(); const blob = new Blob([code], { type: 'text/plain;charset=utf-8' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'main.cs'; a.click(); URL.revokeObjectURL(url); };
+    const executeSendMessage = () => { if (inputMessage.trim() !== '' && wsRef.current) { wsRef.current.send(JSON.stringify({ type: 'chat', data: { sender: username, text: inputMessage.trim() } })); setInputMessage(''); } };
 
     const invitableFriends = onlineFriends.filter(f => !activeUsers.includes(f.username));
 
@@ -286,61 +227,67 @@ export default function EditorRoom({ username }) {
         <div style={{ display: 'flex', height: '100vh', width: '100vw', backgroundColor: '#121212', color: '#fff', fontFamily: 'sans-serif', margin: 0, padding: '20px', boxSizing: 'border-box', gap: '20px', overflow: 'hidden' }}>
 
             {/* SOL PANEL */}
-            <div style={{ width: '320px', height: '100%', display: 'flex', flexDirection: 'column', backgroundColor: '#1a1a1a', borderRadius: '16px', boxSizing: 'border-box', boxShadow: '0 4px 12px rgba(0,0,0,0.3)', padding: '20px' }}>
+            <div style={{ width: '320px', height: '100%', display: 'flex', flexDirection: 'column', backgroundColor: '#1a1a1a', borderRadius: '16px', boxSizing: 'border-box', boxShadow: '0 4px 12px rgba(0,0,0,0.3)', padding: '15px' }}>
 
-                {/* Oda Bilgisi */}
-                <div style={{ backgroundColor: '#252526', padding: '15px', borderRadius: '10px', marginBottom: '15px', border: '1px solid #333' }}>
-                    <h3 style={{ color: '#d4d4d4', margin: '0 0 5px 0', fontSize: '16px' }}>{roomName}</h3>
-                    <p style={{ fontSize: '12px', color: '#888', margin: 0 }}>Oda ID: <span style={{ color: '#85c46c', fontWeight: 'bold' }}>{roomId}</span></p>
+                <div style={{ backgroundColor: '#252526', padding: '12px', borderRadius: '10px', marginBottom: '12px', border: '1px solid #333' }}>
+                    <h3 style={{ color: '#d4d4d4', margin: '0 0 5px 0', fontSize: '15px' }}>{roomName}</h3>
+                    <p style={{ fontSize: '11px', color: '#888', margin: 0 }}>Oda ID: <span style={{ color: '#85c46c', fontWeight: 'bold' }}>{roomId}</span></p>
                 </div>
 
-                {/* 🔴 GELİŞMİŞ SES KONTROL PANELİ */}
-                <div style={{ backgroundColor: isAudioOn ? '#1c3a1e' : '#252526', padding: '15px', borderRadius: '10px', marginBottom: '20px', border: isAudioOn ? '1px solid #4caf50' : '1px solid #333', transition: '0.3s' }}>
-
+                {/* SES KONTROL PANELİ */}
+                <div style={{ backgroundColor: isAudioOn ? '#1c3a1e' : '#252526', padding: '12px', borderRadius: '10px', marginBottom: '12px', border: isAudioOn ? '1px solid #4caf50' : '1px solid #333' }}>
                     {!isAudioOn ? (
-                        // Seste Değilken
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#aaa' }}>🔇 Ses Kanalı Kapalı</span>
-                            <button onClick={startAudio} style={{ padding: '6px 12px', backgroundColor: '#4caf50', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px' }}>Sese Bağlan</button>
+                            <span style={{ fontSize: '12px', color: '#aaa' }}>Sese Bağlanılmadı</span>
+                            <button onClick={startAudio} style={{ padding: '6px 12px', backgroundColor: '#4caf50', border: 'none', borderRadius: '6px', color: '#fff', cursor: 'pointer', fontWeight: 'bold' }}>Bağlan</button>
                         </div>
                     ) : (
-                        // Seste İken Kontroller
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#85c46c' }}>📡 Sese Bağlısın</span>
-                                <button onClick={stopAudio} style={{ padding: '4px 8px', backgroundColor: '#d32f2f', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '11px' }}>❌ Ayrıl</button>
+                                <span style={{ fontSize: '11px', color: '#ffffff' }}>Sese Bağlanıldı</span>
+                                <button onClick={stopAudio} style={{ background: '#d32f2f', color: '#fff', border: 'none', borderRadius: '4px', padding: '3px 8px', fontSize: '10px', cursor: 'pointer' }}>Ayrıl</button>
                             </div>
-
-                            <div style={{ display: 'flex', gap: '10px' }}>
-                                {/* Mikrofon Aç / Kapat */}
-                                <button onClick={toggleMic} style={{ flex: 1, padding: '8px', backgroundColor: isMicOn ? '#2d2d2d' : '#8b0000', color: '#fff', border: '1px solid #444', borderRadius: '6px', cursor: 'pointer', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px' }}>
-                                    <span style={{ fontSize: '16px' }}>{isMicOn ? '🎤' : '🔇'}</span>
-                                    <span style={{ fontSize: '11px', fontWeight: 'bold' }}>{isMicOn ? 'Mikrofon' : 'Sustun'}</span>
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                                <button onClick={toggleMic} style={{ flex: 1, height: '36px', backgroundColor: isMicOn ? '#2d2d2d' : '#8b0000', border: '1px solid #444', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', color: '#fff' }}>
+                                    <img src={isMicOn ? '/mikrofonAcik.png' : '/mikrofonKapali.png'} alt="Mic" style={{ width: '14px', height: '14px', filter: 'invert(1)' }} />
+                                    <span style={{ fontSize: '10px', fontWeight: 'bold' }}>{isMicOn ? 'Açık' : 'Kapalı'}</span>
                                 </button>
-
-                                {/* Hoparlör Aç / Kapat */}
-                                <button onClick={toggleSpeaker} style={{ flex: 1, padding: '8px', backgroundColor: isSpeakerOn ? '#2d2d2d' : '#8b0000', color: '#fff', border: '1px solid #444', borderRadius: '6px', cursor: 'pointer', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px' }}>
-                                    <span style={{ fontSize: '16px' }}>{isSpeakerOn ? '🔊' : '🔈'}</span>
-                                    <span style={{ fontSize: '11px', fontWeight: 'bold' }}>{isSpeakerOn ? 'Hoparlör' : 'Sağır'}</span>
+                                <button onClick={toggleSpeaker} style={{ flex: 1, height: '36px', backgroundColor: isSpeakerOn ? '#2d2d2d' : '#8b0000', border: '1px solid #444', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', color: '#fff' }}>
+                                    <img src={isSpeakerOn ? '/SesAcik.png' : '/SesKapali.png'} alt="Hoparlör" style={{ width: '14px', height: '14px', filter: 'invert(1)' }} />
+                                    <span style={{ fontSize: '10px', fontWeight: 'bold' }}>{isSpeakerOn ? 'Açık' : 'Kapalı'}</span>
                                 </button>
                             </div>
                         </div>
                     )}
                 </div>
 
-                {/* 🔴 ODADAKİLER LİSTESİ VE KULLANICI MİKROFON İKONLARI */}
-                <div style={{ marginBottom: '20px', paddingBottom: '20px', borderBottom: '1px solid #2d2d2d' }}>
-                    <h4 style={{ color: '#85c46c', marginTop: 0, marginBottom: '12px', fontSize: '14px', textTransform: 'uppercase', letterSpacing: '1px' }}>👥 Odadakİler</h4>
-                    <ul style={{ listStyleType: 'none', padding: 0, margin: 0, maxHeight: '100px', overflowY: 'auto' }}>
+                {/* ODADAKİLER LİSTESİ */}
+                <div style={{ marginBottom: '12px', paddingBottom: '12px', borderBottom: '1px solid #2d2d2d' }}>
+                    <h4 style={{ color: '#85c46c', marginTop: 0, marginBottom: '8px', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '1px' }}>👥 Odadakİler</h4>
+                    <ul style={{ listStyleType: 'none', padding: 0, margin: 0, maxHeight: '70px', overflowY: 'auto' }}>
                         {activeUsers.map((user, idx) => (
-                            <li key={idx} style={{ padding: '6px 0', color: user === username ? '#4caf50' : '#4ea8de', fontWeight: 'bold', fontSize: '14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    <span style={{ fontSize: '10px' }}>🟢</span> {user} {user === username ? <span style={{ fontSize: '11px', color: '#888' }}>(Sen)</span> : ''}
+                            <li key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', fontSize: '13px', color: user === username ? '#4caf50' : '#4ea8de', fontWeight: 'bold' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <span style={{ fontSize: '10px' }}>🟢</span>
+                                    {user}
+                                    {user === username ? <span style={{ fontSize: '10px', color: '#888', fontWeight: 'normal' }}>(Sen)</span> : null}
                                 </div>
-                                {/* Konuşanın yanındaki ikonlar */}
-                                <div style={{ display: 'flex', alignItems: 'center' }}>
-                                    {audioStatus[user] === 'unmute' && <span title="Mikrofon Açık" style={{ fontSize: '14px' }}>🎤</span>}
-                                    {audioStatus[user] === 'mute' && <span title="Susturuldu" style={{ fontSize: '14px', opacity: 0.5 }}>🔇</span>}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    {user === username ? (
+                                        isAudioOn ? (
+                                            <>
+                                                <img src={isMicOn ? '/mikrofonAcik.png' : '/mikrofonKapali.png'} alt="Mic" style={{ width: '12px', height: '12px', filter: 'invert(1)', opacity: isMicOn ? 1 : 0.6 }} />
+                                                <img src={isSpeakerOn ? '/SesAcik.png' : '/SesKapali.png'} alt="Hoparlör" style={{ width: '12px', height: '12px', filter: 'invert(1)', opacity: isSpeakerOn ? 1 : 0.6 }} />
+                                            </>
+                                        ) : null
+                                    ) : (
+                                        audioStatus[user] ? (
+                                            <>
+                                                <img src={audioStatus[user] === 'unmute' ? '/mikrofonAcik.png' : '/mikrofonKapali.png'} alt="Mic" style={{ width: '12px', height: '12px', filter: 'invert(1)', opacity: audioStatus[user] === 'unmute' ? 1 : 0.6 }} />
+                                                <img src={audioStatus[user] === 'unmute' ? '/SesAcik.png' : '/SesKapali.png'} alt="Hoparlör" style={{ width: '12px', height: '12px', filter: 'invert(1)', opacity: audioStatus[user] === 'unmute' ? 1 : 0.6 }} />
+                                            </>
+                                        ) : null
+                                    )}
                                 </div>
                             </li>
                         ))}
@@ -348,36 +295,36 @@ export default function EditorRoom({ username }) {
                 </div>
 
                 {/* Davet Et Bölümü */}
-                <div style={{ marginBottom: '20px', paddingBottom: '20px', borderBottom: '1px solid #2d2d2d' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                        <h4 style={{ color: '#4ea8de', margin: '0', fontSize: '14px', textTransform: 'uppercase', letterSpacing: '1px' }}>📡 Davet Et</h4>
-                        {inviteMsg && <span style={{ fontSize: '11px', color: inviteMsg.includes('✅') ? '#85c46c' : '#ff6b6b', fontWeight: 'bold' }}>{inviteMsg}</span>}
+                <div style={{ marginBottom: '12px', paddingBottom: '12px', borderBottom: '1px solid #2d2d2d' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                        <h4 style={{ color: '#4ea8de', margin: '0', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '1px' }}>📡 Davet Et</h4>
+                        {inviteMsg && <span style={{ fontSize: '10px', color: inviteMsg.includes('✅') ? '#85c46c' : '#ff6b6b', fontWeight: 'bold' }}>{inviteMsg}</span>}
                     </div>
-                    <ul style={{ listStyleType: 'none', padding: 0, margin: 0, maxHeight: '120px', overflowY: 'auto' }}>
+                    <ul style={{ listStyleType: 'none', padding: 0, margin: 0, maxHeight: '80px', overflowY: 'auto' }}>
                         {invitableFriends.map(f => (
-                            <li key={f.username} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 10px', backgroundColor: '#252526', borderRadius: '6px', marginBottom: '6px' }}>
-                                <span style={{ fontSize: '13px', color: '#d4d4d4', fontWeight: 'bold' }}>{f.username}</span>
-                                <button onClick={() => inviteFriend(f.username)} style={{ background: '#4ea8de', color: '#121212', border: 'none', borderRadius: '4px', padding: '5px 10px', fontSize: '11px', cursor: 'pointer', fontWeight: 'bold', transition: '0.2s' }}>Çağır</button>
+                            <li key={f.username} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 8px', backgroundColor: '#252526', borderRadius: '6px', marginBottom: '4px' }}>
+                                <span style={{ fontSize: '12px', color: '#d4d4d4', fontWeight: 'bold' }}>{f.username}</span>
+                                <button onClick={() => inviteFriend(f.username)} style={{ background: '#4ea8de', color: '#121212', border: 'none', borderRadius: '4px', padding: '4px 8px', fontSize: '10px', cursor: 'pointer', fontWeight: 'bold', transition: '0.2s' }}>Çağır</button>
                             </li>
                         ))}
-                        {invitableFriends.length === 0 && <div style={{ fontSize: '12px', color: '#666', fontStyle: 'italic', textAlign: 'center', padding: '10px 0' }}>Davet edilecek çevrimiçi kimse yok.</div>}
+                        {invitableFriends.length === 0 && <div style={{ fontSize: '11px', color: '#666', fontStyle: 'italic', textAlign: 'center', padding: '5px 0' }}>Davet edilecek çevrimiçi kimse yok.</div>}
                     </ul>
                 </div>
 
                 {/* Chat */}
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                    <h4 style={{ color: '#d4d4d4', margin: '0 0 12px 0', fontSize: '14px', textTransform: 'uppercase', letterSpacing: '1px' }}>💬 Sohbet</h4>
-                    <div style={{ flex: 1, marginBottom: '12px', padding: '12px', borderRadius: '8px', backgroundColor: '#252526', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: '220px', overflow: 'hidden' }}>
+                    <h4 style={{ color: '#d4d4d4', margin: '0 0 8px 0', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '1px' }}>💬 Sohbet</h4>
+                    <div style={{ flex: 1, marginBottom: '8px', padding: '10px', borderRadius: '8px', backgroundColor: '#252526', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                         {messages.map((msg, index) => (
-                            <div key={index} style={{ fontSize: '13px', backgroundColor: '#1a1a1a', padding: '10px 12px', borderRadius: '8px', borderLeft: `3px solid ${msg.sender === username ? '#85c46c' : '#4ea8de'}` }}>
-                                <b style={{ color: msg.sender === username ? '#85c46c' : '#4ea8de', display: 'block', marginBottom: '4px', fontSize: '11px' }}>{msg.sender}</b>
+                            <div key={index} style={{ fontSize: '12px', backgroundColor: '#1a1a1a', padding: '8px 10px', borderRadius: '8px', borderLeft: `3px solid ${msg.sender === username ? '#85c46c' : '#4ea8de'}` }}>
+                                <b style={{ color: msg.sender === username ? '#85c46c' : '#4ea8de', display: 'block', marginBottom: '3px', fontSize: '10px' }}>{msg.sender}</b>
                                 <span style={{ color: '#d4d4d4', lineHeight: '1.4' }}>{msg.text}</span>
                             </div>
                         ))}
                     </div>
-                    <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
-                        <input type="text" placeholder="Mesaj yaz..." value={inputMessage} onChange={(e) => setInputMessage(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && executeSendMessage()} style={{ flex: 1, padding: '12px', backgroundColor: '#252526', border: '1px solid #333', color: '#fff', borderRadius: '8px', outline: 'none', boxSizing: 'border-box' }} />
-                        <button onClick={executeSendMessage} style={{ backgroundColor: '#85c46c', color: '#121212', border: 'none', padding: '0 16px', cursor: 'pointer', borderRadius: '8px', fontWeight: 'bold' }}>➤</button>
+                    <div style={{ display: 'flex', gap: '6px', width: '100%' }}>
+                        <input type="text" placeholder="Mesaj yaz..." value={inputMessage} onChange={(e) => setInputMessage(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && executeSendMessage()} style={{ flex: 1, padding: '10px', backgroundColor: '#252526', border: '1px solid #333', color: '#fff', borderRadius: '8px', outline: 'none', boxSizing: 'border-box', fontSize: '12px' }} />
+                        <button onClick={executeSendMessage} style={{ backgroundColor: '#85c46c', color: '#121212', border: 'none', padding: '0 14px', cursor: 'pointer', borderRadius: '8px', fontWeight: 'bold' }}>➤</button>
                     </div>
                 </div>
             </div>
@@ -385,16 +332,12 @@ export default function EditorRoom({ username }) {
             {/* SAĞ PANEL */}
             <div style={{ flex: 1, height: '100%', display: 'flex', flexDirection: 'column', backgroundColor: '#1a1a1a', borderRadius: '16px', overflow: 'hidden', boxSizing: 'border-box', boxShadow: '0 4px 12px rgba(0,0,0,0.3)' }}>
                 <div style={{ padding: '15px 25px', backgroundColor: '#1a1a1a', borderBottom: '1px solid #333', display: 'flex', justifyContent: 'space-between', alignItems: 'center', height: '60px', boxSizing: 'border-box' }}>
-
                     <button onClick={() => navigate('/')} style={{ backgroundColor: '#333', color: '#fff', border: 'none', padding: '8px 16px', cursor: 'pointer', borderRadius: '8px', fontWeight: 'bold', fontSize: '13px' }}>🔙 Lobiye Dön</button>
-
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                         <button onClick={copyRoomLink} style={{ backgroundColor: 'transparent', color: '#888', border: '1px solid #333', padding: '8px 16px', cursor: 'pointer', borderRadius: '8px', fontWeight: 'bold' }}>Bağlantıyı Kopyala</button>
                         <button onClick={downloadCode} style={{ backgroundColor: '#333', color: '#fff', border: 'none', padding: '8px 16px', cursor: 'pointer', borderRadius: '8px', fontWeight: 'bold' }}>⬇️ İndir</button>
                     </div>
-
                 </div>
-
                 <div style={{ flex: 1, backgroundColor: '#1e1e1e', width: '100%', overflow: 'hidden' }}>
                     <Editor height="100%" defaultLanguage="csharp" theme="vs-dark" onMount={handleEditorDidMount} options={{ fontSize: 16, minimap: { enabled: true }, automaticLayout: true }} />
                 </div>
